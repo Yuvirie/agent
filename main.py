@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from functions.call_function import call_function
 import argparse
 
 
@@ -50,8 +51,8 @@ schema_run_python_file = types.FunctionDeclaration(
         },
     ),
 )
-schema_get_write_file = types.FunctionDeclaration(
-    name="get_write_file",
+schema_write_file = types.FunctionDeclaration(
+    name="write_file",
     description="Overrides the specified file with provided content, constrained to the working directory.",
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -72,7 +73,7 @@ available_functions = types.Tool(
     function_declarations=[
         schema_get_files_info,
         schema_get_file_content,
-        schema_get_write_file,
+        schema_write_file,
         schema_run_python_file
     ]
 )
@@ -88,7 +89,12 @@ When a user asks a question or makes a request, make a function call plan. You c
 - Execute Python files with optional arguments
 - Write or overwrite files
 
+Always start with analyzing user question and try to find a proper file that the questions is refering too and then analyze it. Then go to the heart of the issue while you have proper context to do so.
+
 All paths you provide should be relative to the working directory. You do not need to specify the working directory in your function calls as it is automatically injected for security reasons.
+
+You should always assume that user asks the question related to function calls.
+Also and it's critical, but when asked for a fix, fix the underlying issue after you analyse it, do not go for symptom fix.
 """
 
 
@@ -107,30 +113,51 @@ messages = [
     types.Content(role="user", parts=[types.Part(text=user_prompt)]),
 ]
 
-test_response = client.models.generate_content(
-    model="gemini-2.0-flash-001", 
-    contents=messages,
-    config=types.GenerateContentConfig(
-        tools=[available_functions], system_instruction=system_prompt
+#agent loop
+
+iterations = 0
+
+for iteriations in range(iterations, 20):
+    
+    test_response = client.models.generate_content(
+        model="gemini-2.0-flash-001", 
+        contents=messages,
+        config=types.GenerateContentConfig(
+            tools=[available_functions], system_instruction=system_prompt
+            )
         )
-    )
 
-if test_response.function_calls:
-    functions = test_response.function_calls
-else: 
-    functions = None
+    for candidate in test_response.candidates:
+        messages.append(candidate.content)
 
-if args.verbose and test_response.usage_metadata:
-    print(f"User prompt: {user_prompt}")
-    print(f"Prompt tokens: {test_response.usage_metadata.prompt_token_count}")
-    print(f"Response tokens: {test_response.usage_metadata.candidates_token_count}")
+    if test_response.function_calls:
+        functions = test_response.function_calls
+    else: 
+        functions = None
+
+    if args.verbose and test_response.usage_metadata:
+        print(f"User prompt: {user_prompt}")
+        print(f"Prompt tokens: {test_response.usage_metadata.prompt_token_count}")
+        print(f"Response tokens: {test_response.usage_metadata.candidates_token_count}")
+        if functions:
+            for func in functions:
+                function_call_result = call_function(func)
+                if not function_call_result.parts[0].function_response.response:
+                    raise Exception("Error: No response from called function")
+                if args.verbose:
+                    print(f"-> {function_call_result.parts[0].function_response.response}")
+                
+                messages.append(function_call_result)
+    else:
+        if functions:
+            for func in functions:
+                function_call_result = call_function(func)
+                print(f"Calling function: {func.name}({func.args})")
+                messages.append(function_call_result)
+    
+    
     if functions:
-        for func in functions:
-            print(f"Calling function: {func.name}({func.args})")
-    print(test_response.text)
-
-else:
-    if functions:
-        for func in functions:
-            print(f"Calling function: {func.name}({func.args})")
-    print(test_response.text)
+        iterations += 1
+    else:
+        print(test_response.text)
+        break
